@@ -1,0 +1,225 @@
+#cloud-config
+
+
+write_files:
+  - path: /srv/tinc_initial_config.sh
+    permissions: 0774
+    owner: root
+    content: |
+      #!/bin/sh
+      export DOCKER_HOST=unix:///var/run/early-docker.sock
+      . /etc/tinc-env
+      for host in `etcdctl ls /services/tinc/ | sed -e 's/\/services\/tinc\///'`; do
+        if [ "$TINC_HOSTNAME" != "$host" ]; then
+          docker run --rm --volume /srv/tinc:/etc/tinc  jenserat/tinc add ConnectTo = $host
+          etcdctl get /services/tinc/$host | sed -e 's/\"//g' > /srv/tinc/hosts/$host
+        fi
+      done
+      docker exec tinc /usr/sbin/tinc reload
+
+  - path: /srv/tinc_conf_updater.sh
+    permissions: 0774
+    owner: root
+    content: |
+      #!/bin/sh
+      export DOCKER_HOST=unix:///var/run/early-docker.sock
+      . /etc/tinc-env
+      host=${ETCD_WATCH_KEY/\/services\/tinc\//}
+      echo "host is $host"
+      echo "$ETCD_WATCH_KEY\" key was updated to \"$ETCD_WATCH_VALUE\" value by \"$ETCD_WATCH_ACTION\" action"
+      if [ $TINC_HOSTNAME != $host ]; then
+        if [ "$ETCD_WATCH_ACTION" = "set" ]; then
+          echo "configuring new tinc host $host"
+          current_value="";
+          if [ -f /srv/tinc/hosts/$host ]; then
+            current_value="$( cat /srv/tinc/hosts/$host )"
+          fi
+          if [ "$ETCD_WATCH_VALUE" != "\"$current_value\"" ]; then
+            docker run --rm --volume /srv/tinc:/etc/tinc  jenserat/tinc add ConnectTo = $host
+            etcdctl get /services/tinc/$host | sed -e 's/\"//g' > /srv/tinc/hosts/$host
+            docker exec tinc /usr/sbin/tinc reload
+            echo "done"
+          else
+           echo "old value = new value; nothing to do"
+          fi
+        fi
+        if [ "$ETCD_WATCH_ACTION" = "delete" ] || [ "$ETCD_WATCH_ACTION" = "expire" ]; then
+          echo "removing tinc host $host"
+          docker run --rm --volume /srv/tinc:/etc/tinc  jenserat/tinc del ConnectTo = $host
+          rm -f /srv/tinc/hosts/$host
+          docker exec tinc /usr/sbin/tinc reload
+          echo "done"
+        fi
+      fi
+
+coreos:
+  etcd:
+    # generate a new token for each unique cluster from https://discovery.etcd.io/new
+    # WARNING: replace each time you 'vagrant destroy'
+    discovery: https://discovery.etcd.io/fdbcfbc742b540504e36ebb23e48f4b0
+    addr: $public_ipv4:4001
+    peer-addr: $public_ipv4:7001
+  etcd2:
+    #generate a new token for each unique cluster from https://discovery.etcd.io/new
+    #discovery: https://discovery.etcd.io/<token>
+    # multi-region and multi-cloud deployments need to use $public_ipv4
+    advertise-client-urls: http://$public_ipv4:2379
+    initial-advertise-peer-urls: http://$private_ipv4:2380
+    # listen on both the official ports and the legacy ports
+    # legacy ports can be omitted if your application doesn't depend on them
+    listen-client-urls: http://0.0.0.0:2379,http://0.0.0.0:4001
+    listen-peer-urls: http://$private_ipv4:2380,http://$private_ipv4:7001
+  fleet:
+    public-ip: $public_ipv4
+  flannel:
+    interface: $public_ipv4
+  units:
+    - name: etcd.service
+      command: start
+    #To use etcd2, comment out the above service and uncomment these
+    # Note: this requires a release that contains etcd2
+    #- name: etcd2.service
+    #  command: start
+    
+    - name: early-docker.service
+      command: start
+      enable: true
+    - name: tinc-env.service
+      enable: true
+      command: start
+      content: |
+        [Unit]
+        Description=Tinc Service
+        Author=Cornelius Keller
+        After=etcd.service etcd2.service early-docker.service flanneld.service
+        Before=early-docker.target fleet.service
+        
+        [Service]
+        Type=oneshot
+        ExecStart=/bin/sh -c "echo \"TINC_HOSTNAME=`hostname | sed -e 's/-/_/g'`\" > /etc/tinc-env"
+    - name: flannel-wait.service
+      command: start
+      enable: true
+      content: |
+
+        [Unit]
+        Description=Wait For Flannel
+        Author=Cornelius Keller
+        Requires=flanneld.service
+        After=etcd.service etcd2.service early-docker.service flanneld.service
+        Before=early-docker.target
+
+        [Service]
+        Type=oneshot
+        ExecStart=/bin/sh -c "echo \"TINC_HOSTNAME=`hostname | sed -e 's/-/_/g'`\" > /etc/tinc-env"
+        ExecStartPre=/bin/sh -c "while [ ! -f /run/flannel/subnet.env ] ; do sleep 1; done"
+
+    - name: tinc-conf.service
+      enable: true
+      command: start
+      content: |
+        [Unit]
+        Description=Tinc Configuration Service
+        Author=Cornelius Keller
+        After=etcd.service etcd2.service early-docker.service flanneld.service
+        Before=early-docker.target fleet.service
+
+        [Service]
+        Type=oneshot
+        ExecStart=/bin/sh -c "echo \"TINC_HOSTNAME=`hostname | sed -e 's/-/_/g'`\" > /etc/tinc-env"
+
+    - name: tinc.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=Tinc VPN Service
+        Author=Cornelius Keller
+        Requires=flannel-wait.service
+        After=early-docker.service flanneld.service tinc-env.service flannel-wait.service
+
+        Before=early-docker.target
+
+        [Service]
+        Environment="DOCKER_HOST=unix:///var/run/early-docker.sock"
+        EnvironmentFile=/etc/tinc-env
+
+        EnvironmentFile=/etc/environment
+
+
+        ExecStartPre=/usr/bin/docker pull jenserat/tinc
+        ExecStartPre=/usr/bin/rm -rf /srv/tinc
+        ExecStartPre=/usr/bin/mkdir -p /srv/tinc
+        ExecStartPre=/bin/sh -c "/usr/bin/docker run --rm --volume /srv/tinc:/etc/tinc  jenserat/tinc init $TINC_HOSTNAME"
+        ExecStartPre=/bin/sh -c "/usr/bin/docker run --rm --volume /srv/tinc:/etc/tinc  jenserat/tinc add Address = $COREOS_PUBLIC_IPV4"
+        EnvironmentFile=/run/flannel/subnet.env
+        ExecStartPre=/bin/sh -c "/usr/bin/docker run --rm --volume /srv/tinc:/etc/tinc  jenserat/tinc add Subnet = `echo $FLANNEL_SUBNET | sed -e 's/1\\/24/0\\/24/'`"
+        ExecStartPre=/bin/sh -c "/usr/bin/docker run --rm --volume /srv/tinc:/etc/tinc  jenserat/tinc add Mode = switch"
+        ExecStartPre=/bin/sh -c "/usr/bin/docker run --rm --volume /srv/tinc:/etc/tinc  jenserat/tinc add DeviceType = tap"
+        ExecStartPre=-/usr/bin/docker rm -f tinc 
+        ExecStartPre=/usr/bin/docker run --name tinc  -d --volume /srv/tinc:/etc/tinc --net=host --device=/dev/net/tun --cap-add NET_ADMIN jenserat/tinc start  -D
+
+        ExecStart=/bin/sh -c "while true; do etcdctl set /services/tinc/$TINC_HOSTNAME  \"\\\"` cat /srv/tinc/hosts/$TINC_HOSTNAME `\"\\\" --ttl 60;sleep 45;done"
+
+        ExecStop=/usr/bin/docker rm -f tinc
+        ExecStopPost=/bin/sh -c  "etcdctl rm /services/tinc/$TINC_HOSTNAME"
+
+    - name: flanneld.service
+      command: start
+      enable: true
+      drop-ins:
+        - name: 50-network-config.conf
+          content: |
+            [Service]
+            ExecStartPre=/usr/bin/etcdctl set /coreos.com/network/config '{ "Network": "10.1.0.0/16", "Backend": { "Type": "alloc"} }' 
+    - name: docker-bridge.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=Configure Docker Bridge
+        Requires=docker.service
+        #After=docker.socket
+        [Service]
+        Type=oneshot
+        #ExecStartPre=-/bin/sh -c "route del -net 10.1.0.0 netmask 255.255.0.0 dev tap0"
+        ExecStartPre=/bin/sh -c "while ! ifconfig -s | grep -q tap0 ; do  sleep 1; done"
+        ExecStartPre=/bin/sh -c "while ! ifconfig -s | grep -q docker0 ; do  sleep 1; done"
+        ExecStartPre=/bin/sh -c "route add -net 10.1.0.0 netmask 255.255.0.0 dev docker0"
+        #ExecStartPre=-/bin/sh -c "brctl delif docker0 tap0"
+        ExecStart=/bin/sh -c "brctl addif docker0 tap0"
+
+
+
+    - name: tinc-config-updater.service
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=Countinously update tinc configuration after ectd changes
+        Requires=tinc.service
+        Restart=always
+        After=tinc.service
+        
+        [Service]
+        ExecStartPre=/srv/tinc_initial_config.sh
+        ExecStart=/usr/bin/etcdctl exec-watch --recursive /services/tinc -- /srv/tinc_conf_updater.sh
+
+
+    - name: fleet.service
+      command: start
+    - name: docker-tcp.socket
+      command: start
+      enable: true
+      content: |
+        [Unit]
+        Description=Docker Socket for the API
+
+        [Socket]
+        ListenStream=2375
+        Service=docker.service
+        BindIPv6Only=both
+
+        [Install]
+        WantedBy=sockets.target
+
