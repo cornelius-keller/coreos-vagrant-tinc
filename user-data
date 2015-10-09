@@ -4,6 +4,7 @@
 # TODO wait for devices as described in https://lists.fedoraproject.org/pipermail/devel/2012-January/160917.html
 # udevadm info -a -p /sys/class/net/eth0/
 
+
 write_files:
   - path: /srv/tinc_initial_config.sh
     permissions: 0774
@@ -56,28 +57,28 @@ write_files:
       fi
 
 coreos:
-  etcd:
+  #etcd:
     # generate a new token for each unique cluster from https://discovery.etcd.io/new
     # WARNING: replace each time you 'vagrant destroy'
-    discovery: https://discovery.etcd.io/fdbcfbc742b540504e36ebb23e48f4b0
-    addr: $public_ipv4:4001
-    peer-addr: $public_ipv4:7001
+    #discovery: https://discovery.etcd.io/4dbce9b90646e13c17bd298cffc0ed99
+    #addr: $public_ipv4:4001
+    #peer-addr: $public_ipv4:7001
   etcd2:
-    #generate a new token for each unique cluster from https://discovery.etcd.io/new
-    #discovery: https://discovery.etcd.io/<token>
+    # generate a new token for each unique cluster from https://discovery.etcd.io/new?size=3
+    discovery: "https://discovery.etcd.io/58ae5350f598e02901e5ded2c657c6bf"
     # multi-region and multi-cloud deployments need to use $public_ipv4
-    advertise-client-urls: http://$public_ipv4:2379
-    initial-advertise-peer-urls: http://$private_ipv4:2380
+    advertise-client-urls: "http://$public_ipv4:2379"
+    initial-advertise-peer-urls: "http://$public_ipv4:2380"
     # listen on both the official ports and the legacy ports
     # legacy ports can be omitted if your application doesn't depend on them
-    listen-client-urls: http://0.0.0.0:2379,http://0.0.0.0:4001
-    listen-peer-urls: http://$private_ipv4:2380,http://$private_ipv4:7001
+    listen-client-urls: "http://0.0.0.0:2379,http://0.0.0.0:4001"
+    listen-peer-urls: "http://$public_ipv4:2380,http://$public_ipv4:7001"
   fleet:
     public-ip: $public_ipv4
   flannel:
     interface: $public_ipv4
   units:
-    - name: etcd.service
+    - name: etcd2.service
       command: start
     #To use etcd2, comment out the above service and uncomment these
     # Note: this requires a release that contains etcd2
@@ -93,7 +94,6 @@ coreos:
       content: |
         [Unit]
         Description=Tinc Service
-        Author=Cornelius Keller
         After=etcd.service etcd2.service early-docker.service flanneld.service
         Before=early-docker.target fleet.service
         
@@ -107,7 +107,6 @@ coreos:
 
         [Unit]
         Description=Wait For Flannel
-        Author=Cornelius Keller
         Requires=flanneld.service
         After=etcd.service etcd2.service early-docker.service flanneld.service
         Before=early-docker.target
@@ -123,7 +122,6 @@ coreos:
       content: |
         [Unit]
         Description=Tinc Configuration Service
-        Author=Cornelius Keller
         After=etcd.service etcd2.service early-docker.service flanneld.service
         Before=early-docker.target fleet.service
 
@@ -137,7 +135,6 @@ coreos:
       content: |
         [Unit]
         Description=Tinc VPN Service
-        Author=Cornelius Keller
         Requires=flannel-wait.service
         After=early-docker.service flanneld.service tinc-env.service flannel-wait.service
 
@@ -225,4 +222,3 @@ coreos:
 
         [Install]
         WantedBy=sockets.target
-
