@@ -1,5 +1,8 @@
 #cloud-config
 
+# TODO wait for files as described in http://www.freedesktop.org/software/systemd/man/systemd.path.html
+# TODO wait for devices as described in https://lists.fedoraproject.org/pipermail/devel/2012-January/160917.html
+# udevadm info -a -p /sys/class/net/eth0/
 
 write_files:
   - path: /srv/tinc_initial_config.sh
